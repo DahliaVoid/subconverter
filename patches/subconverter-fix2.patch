@@ -1,0 +1,217 @@
+From 6b4d9fa67adb2aac5bb987340b409c6349a6b4c4 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sat, 1 Aug 2026 16:06:24 +0800
+Subject: [PATCH] quote REALITY short-id in clash output; harden sid parsing;
+ fix sing-box tls output
+
+- Clash/ClashR output now force-quotes short-id values. YAML 1.1 parsers
+  (go-yaml used by Clash Verge/Mihomo) previously reinterpreted values
+  like 72696e32 as float 7.2696e36, corrupting the sid during the
+  clash-verge-check.yaml round-trip and causing 'invalid REALITY short ID'.
+- Parser drops invalid (odd-length/non-hex/oversized) short IDs with a
+  warning instead of emitting configs that fail whole-subscription checks.
+- Clash generator emits reality-opts whenever public-key exists, so nodes
+  with an omitted short-id keep their reality settings.
+- Sing-box: merge tls.server_name/insecure into the existing tls object
+  instead of emitting a duplicate tls key that overwrote reality/utls.
+- Sing-box AnyTLS: fix fingerprint being written as insecure=true.
+
+diff --git a/src/generator/config/subexport.cpp b/src/generator/config/subexport.cpp
+index c7d33a2..ac64704 100644
+--- a/src/generator/config/subexport.cpp
++++ b/src/generator/config/subexport.cpp
+@@ -1,6 +1,7 @@
+ #include <algorithm>
+ #include <iostream>
+ #include <numeric>
++#include <regex>
+ #include <cmath>
+ #include <climits>
+ 
+@@ -695,9 +696,10 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
+                 // Fallback for backward compatibility
+                 singleproxy["flow"] = x.Flow;
+             }
+-            if (!x.PublicKey.empty() && !x.ShortID.empty()) {
++            if (!x.PublicKey.empty()) {
+                 singleproxy["reality-opts"]["public-key"] = x.PublicKey;
+-                singleproxy["reality-opts"]["short-id"] = x.ShortID;
++                if (!x.ShortID.empty())
++                    singleproxy["reality-opts"]["short-id"] = x.ShortID;
+                 if (!x.SpiderX.empty())
+                     singleproxy["reality-opts"]["spider-x"] = x.SpiderX;
+                 if (!x.ClientFingerprint.empty()) {
+@@ -826,6 +828,30 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
+         yamlnode["Proxy Group"] = original_groups;
+ }
+ 
++std::string dumpClashYaml(const YAML::Node &node)
++{
++    std::string out = YAML::Dump(node);
++    // Force-quote unquoted short-id values. YAML 1.1 parsers (go-yaml used by
++    // Clash Verge / Mihomo) reinterpret values such as 72696e32 as a float
++    // (7.2696e36), corrupting REALITY short IDs during config round-trips.
++    std::regex re(R"((short-id:\s*)(?:"[^"]*"|'[^']*'|([^,\s}\n]+)))");
++    std::string result;
++    std::string::const_iterator it = out.begin(), end = out.end();
++    std::smatch m;
++    while (std::regex_search(it, end, m, re))
++    {
++        result.append(m.prefix().first, m.prefix().second);
++        result.append(m[1].first, m[1].second);
++        if (m[2].matched)
++            result += "\"" + m[2].str() + "\"";
++        else
++            result.append(m[0].first + m[1].length(), m[0].second);
++        it = m[0].second;
++    }
++    result.append(it, end);
++    return result;
++}
++
+ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf, std::vector<RulesetContent> &ruleset_content_array, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
+ {
+     YAML::Node yamlnode;
+@@ -843,16 +869,16 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
+     proxyToClash(nodes, yamlnode, extra_proxy_group, clashR, ext);
+ 
+     if(ext.nodelist)
+-        return YAML::Dump(yamlnode);
++        return dumpClashYaml(yamlnode);
+ 
+     /*
+     if(ext.enable_rule_generator)
+         rulesetToClash(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
+ 
+-    return YAML::Dump(yamlnode);
++    return dumpClashYaml(yamlnode);
+     */
+     if(!ext.enable_rule_generator)
+-        return YAML::Dump(yamlnode);
++        return dumpClashYaml(yamlnode);
+ 
+     if(!ext.managed_config_prefix.empty() || ext.clash_script)
+     {
+@@ -865,11 +891,11 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
+         }
+ 
+         renderClashScript(yamlnode, ruleset_content_array, ext.managed_config_prefix, ext.clash_script, ext.overwrite_original_rules, ext.clash_classical_ruleset);
+-        return YAML::Dump(yamlnode);
++        return dumpClashYaml(yamlnode);
+     }
+ 
+     std::string output_content = rulesetToClashStr(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
+-    output_content.insert(0, YAML::Dump(yamlnode));
++    output_content.insert(0, dumpClashYaml(yamlnode));
+     //rulesetToClash(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
+     //std::string output_content = YAML::Dump(yamlnode);
+ 
+@@ -2760,7 +2786,7 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
+                 if (!scv.is_undef())
+                     tls.AddMember("insecure", scv.get(), allocator);
+                 if (!x.Fingerprint.empty())
+-                    tls.AddMember("insecure", true, allocator);
++                    tls.AddMember("fingerprint", rapidjson::StringRef(x.Fingerprint.c_str()), allocator);
+                 if (!x.Alpn.empty()) {
+                     rapidjson::Value alpn(rapidjson::kArrayType);
+                     for (const auto& item : x.Alpn)
+@@ -2804,11 +2830,10 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
+                     tls.AddMember("alpn", alpn, allocator);
+                 }
+ 
+-                if (!x.PublicKey.empty() && !x.ShortID.empty()) {
++                if (!x.PublicKey.empty()) {
+                     rapidjson::Value reality(rapidjson::kObjectType);
+                     reality.AddMember("enabled", true, allocator);
+-                    if (!x.PublicKey.empty())
+-                        reality.AddMember("public_key", rapidjson::StringRef(x.PublicKey.c_str()), allocator);
++                    reality.AddMember("public_key", rapidjson::StringRef(x.PublicKey.c_str()), allocator);
+                     if (!x.ShortID.empty())
+                         reality.AddMember("short_id", rapidjson::StringRef(x.ShortID.c_str()), allocator);
+                     tls.AddMember("reality", reality, allocator);
+@@ -2857,7 +2882,18 @@ void proxyToSingBox(std::vector<Proxy> &nodes, rapidjson::Document &json, std::v
+             else if (!x.Host.empty())
+                 tls.AddMember("server_name", rapidjson::StringRef(x.Host.c_str()), allocator);
+             tls.AddMember("insecure", buildBooleanValue(scv), allocator);
+-            proxy.AddMember("tls", tls, allocator);
++            if (proxy.HasMember("tls"))
++            {
++                rapidjson::Value &existing = proxy["tls"];
++                if (!existing.HasMember("server_name") && tls.HasMember("server_name"))
++                    existing.AddMember("server_name", rapidjson::Value(tls["server_name"].GetString(), allocator), allocator);
++                if (!existing.HasMember("insecure"))
++                    existing.AddMember("insecure", tls["insecure"].GetBool(), allocator);
++            }
++            else
++            {
++                proxy.AddMember("tls", tls, allocator);
++            }
+         }
+         if (!udp.is_undef() && !udp)
+         {
+diff --git a/src/generator/config/subexport.h b/src/generator/config/subexport.h
+index fd77055..4bd8800 100644
+--- a/src/generator/config/subexport.h
++++ b/src/generator/config/subexport.h
+@@ -58,6 +58,7 @@ struct extra_settings
+ #endif // NO_JS_RUNTIME
+ };
+ 
++std::string dumpClashYaml(const YAML::Node &node);
+ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf, std::vector<RulesetContent> &ruleset_content_array, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext);
+ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext);
+ std::string proxyToSurge(std::vector<Proxy> &nodes, const std::string &base_conf, std::vector<RulesetContent> &ruleset_content_array, const ProxyGroupConfigs &extra_proxy_group, int surge_ver, extra_settings &ext);
+diff --git a/src/handler/interfaces.cpp b/src/handler/interfaces.cpp
+index 0aa5023..c4350c8 100644
+--- a/src/handler/interfaces.cpp
++++ b/src/handler/interfaces.cpp
+@@ -769,7 +769,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
+         {
+             YAML::Node yamlnode;
+             proxyToClash(nodes, yamlnode, dummy_group, argTarget == "clashr", ext);
+-            output_content = YAML::Dump(yamlnode);
++            output_content = dumpClashYaml(yamlnode);
+         }
+         else
+         {
+diff --git a/src/parser/subparser.cpp b/src/parser/subparser.cpp
+index 02f4e9b..f7b85f2 100644
+--- a/src/parser/subparser.cpp
++++ b/src/parser/subparser.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "utils/base64/base64.h"
+ #include "utils/ini_reader/ini_reader.h"
++#include "utils/logger.h"
+ #include "utils/network.h"
+ #include "utils/rapidjson_extra.h"
+ #include "utils/regexp.h"
+@@ -39,6 +40,17 @@ void commonConstruct(Proxy &node, ProxyType type, const std::string &group, cons
+     node.TLS13 = tls13;
+ }
+ 
++// REALITY short ID must be a hex string with even length, at most 8 bytes (16 hex chars)
++bool isValidRealityShortID(const std::string &sid)
++{
++    if (sid.empty() || sid.size() % 2 != 0 || sid.size() > 16)
++        return false;
++    for (char c : sid)
++        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
++            return false;
++    return true;
++}
++
+ void vmessConstruct(Proxy &node, const std::string &group, const std::string &remarks, const std::string &add, const std::string &port, const std::string &type, const std::string &id, const std::string &aid, const std::string &net, const std::string &cipher, const std::string &path, const std::string &host, const std::string &edge, const std::string &tls, const std::string &sni, tribool udp, tribool tfo, tribool scv, tribool tls13, const std::string& underlying_proxy)
+ {
+     commonConstruct(node, ProxyType::VMess, group, remarks, add, port, udp, tfo, scv, tls13, underlying_proxy);
+@@ -387,6 +399,10 @@ void vlessConstruct(
+     node.XTLS = to_int(xtls);
+     node.PublicKey = public_key;
+     node.ShortID = short_id;
++    if (!short_id.empty() && !isValidRealityShortID(short_id)) {
++        writeLog(0, "Node '" + remarks + "' has invalid REALITY short-id '" + short_id + "', ignoring it", LOG_LEVEL_WARNING);
++        node.ShortID.clear();
++    }
+ }
+ 
+ void explodeVmess(std::string vmess, Proxy &node)
