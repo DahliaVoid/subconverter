@@ -1,4 +1,4 @@
-# subconverter
+# Subconverter
 
 在各种订阅格式之间进行转换的实用程序.
 
@@ -10,6 +10,10 @@
 * * *
 
 ## 新增内容
+
+2026/8/3
+-   修复 REALITY short-id 在 Clash 输出中被 YAML 1.1 误读、vless 参数解析（fp/spx/alpn）、Sing-box tls 输出等问题
+
 
 2021/10/1
 
