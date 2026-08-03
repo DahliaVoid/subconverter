@@ -1,54 +1,71 @@
-# subconverter-docker
+# subconverter Docker 使用说明
 
-This is a minimized image to run https://github.com/metacubex/subconverter.
+本项目提供 subconverter 的本地 Docker 构建方式。项目根目录的 Dockerfile 会从源码编译 subconverter，并把仓库内的 `base/` 目录作为运行配置一起打包进镜像。
 
-For running this docker, simply use the following commands:
+## 构建镜像
+
+在项目根目录执行：
+
 ```bash
-# run the container detached, forward internal port 25500 to host port 25500
-docker run -d --restart=always -p 25500:25500 metacubex/subconverter:latest
-# then check its status
-curl http://localhost:25500/version
-# if you see `subconverter vx.x.x backend` then the container is up and running
+docker build -t subconverter:local .
 ```
-Or run in docker-compose:
+
+可选构建参数：
+
+```bash
+docker build --build-arg THREADS=2 --build-arg SHA=commit-id -t subconverter:local .
+```
+
+- `THREADS`：编译并行线程数，默认 4
+- `SHA`：可选，追加到版本号后的提交标识
+
+## 运行容器
+
+```bash
+docker run -d --restart=always -p 25500:25500 subconverter:local
+```
+
+检查运行状态：
+
+```bash
+curl http://localhost:25500/version
+```
+
+看到类似 `subconverter v0.x.x backend` 的输出即表示服务正常。
+
+## 使用 docker-compose
+
 ```yaml
----
 version: '3'
 services:
   subconverter:
-    image: metacubex/subconverter:latest
+    image: subconverter:local
     container_name: subconverter
     ports:
-      - "15051:25500"
+      - "25500:25500"
     restart: always
 ```
 
-If you want to update `pref` configuration inside the docker, you can use the following command:
+## 修改配置
+
+镜像内程序的工作目录为 `/base`，运行配置（pref、规则、模板等）来自项目根目录的 `base/`。修改配置后重新构建并重建容器：
+
 ```bash
-# assume your configuration file name is `newpref.ini`
-curl -F "data=@newpref.ini" http://localhost:25500/updateconf?type=form\&token=password
-# you may want to change this token in your configuration file
+docker build -t subconverter:local .
+docker stop subconverter && docker rm subconverter
+docker run -d --restart=always -p 25500:25500 subconverter:local
 ```
 
-For those who want to use their own `pref` configuration and/or rules, snippets, profiles:
-```txt
-# you can save the files you want to replace to a folder, then copy it into to the docker
-# using the latest build of the official docker
-FROM metacubex/subconverter:latest
-# assume your files are inside replacements/
-# subconverter folder is located in /base/, which has the same structure as the base/ folder in the repository
-COPY replacements/ /base/
-# expose internal port
-EXPOSE 25500
-# notice that you still need to use '-p 25500:25500' when starting the docker to forward this port
-```
-Save the content above to a `Dockerfile`, then run:
+使用 compose 时：
+
 ```bash
-# build with this Dockerfile and tag it subconverter-custom
-docker build -t subconverter-custom:latest .
-# run the docker detached, forward internal port 25500 to host port 25500
-docker run -d --restart=always -p 25500:25500 subconverter-custom:latest
-# then check its status
-curl http://localhost:25500/version
-# if you see `subconverter vx.x.x backend` then the container is up and running
+docker compose up -d --force-recreate
 ```
+
+也可以在线更新 pref 配置：
+
+```bash
+curl -F "data=@newpref.ini" "http://localhost:25500/updateconf?type=form&token=password"
+```
+
+其中 token 需要在配置文件中自行设置。
