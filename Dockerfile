@@ -2,7 +2,6 @@
 # 构建：docker build -t subconverter:local .
 
 FROM alpine:3.16 AS builder
-LABEL maintainer="metacubex.official@gmail.com"
 ARG THREADS="4"
 ARG SHA=""
 
@@ -46,7 +45,6 @@ RUN cd /subconverter && \
     make -j $THREADS
 
 FROM alpine:3.16
-LABEL maintainer="local-build"
 
 RUN apk add --no-cache --virtual subconverter-deps pcre2 libcurl yaml-cpp
 
